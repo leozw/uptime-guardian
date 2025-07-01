@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: domainmonitor
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secretpassword}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.api
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://postgres:${DB_PASSWORD:-secretpassword}@postgres:5432/domainmonitor?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key}
+      MIMIR_URL: ${MIMIR_URL:-http://mimir:9009}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.worker
+    environment:
+      DATABASE_URL: postgres://postgres:${DB_PASSWORD:-secretpassword}@postgres:5432/domainmonitor?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      MIMIR_URL: ${MIMIR_URL:-http://mimir:9009}
+      WORKER_COUNT: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 2
+
+  scheduler:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.scheduler
+    environment:
+      DATABASE_URL: postgres://postgres:${DB_PASSWORD:-secretpassword}@postgres:5432/domainmonitor?sslmode=disable
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  migrate:
+    image: migrate/migrate
+    volumes:
+      - ../../migrations:/migrations
+    command: [
+      "-path", "/migrations",
+      "-database", "postgres://postgres:${DB_PASSWORD:-secretpassword}@postgres:5432/domainmonitor?sslmode=disable",
+      "up"
+    ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
