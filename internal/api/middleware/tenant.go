@@ -4,32 +4,31 @@ import (
     "net/http"
 
     "github.com/gin-gonic/gin"
-    "github.com/leozw/uptime-guardian/internal/storage/postgres"
+    "github.com/golang-jwt/jwt/v5"
 )
 
-func TenantContext(db *postgres.DB) gin.HandlerFunc {
+func Tenant() gin.HandlerFunc {
     return func(c *gin.Context) {
-        tenantID := c.GetString("tenant_id")
-        if tenantID == "" {
-            c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found"})
+        claims, exists := c.Get("claims")
+        if !exists {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Claims not found"})
             c.Abort()
             return
         }
-
-        tenant, err := db.GetTenant(tenantID)
-        if err != nil {
-            c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid tenant"})
+        
+        jwtClaims := claims.(jwt.MapClaims)
+        
+        // Extract organization as tenant_id
+        organization, ok := jwtClaims["organization"].(string)
+        if !ok || organization == "" {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "Organization not found in token"})
             c.Abort()
             return
         }
-
-        if !tenant.IsActive {
-            c.JSON(http.StatusForbidden, gin.H{"error": "Account is disabled"})
-            c.Abort()
-            return
-        }
-
-        c.Set("tenant", tenant)
+        
+        c.Set("tenant_id", organization)
+        c.Set("X-Scope-OrgID", organization)
+        
         c.Next()
     }
 }

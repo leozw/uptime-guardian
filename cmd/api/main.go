@@ -2,6 +2,7 @@ package main
 
 import (
     "context"
+    "fmt"
     "log"
     "net/http"
     "os"
@@ -9,59 +10,96 @@ import (
     "syscall"
     "time"
 
+    "github.com/gin-gonic/gin"
     "github.com/leozw/uptime-guardian/internal/api"
+    "github.com/leozw/uptime-guardian/internal/api/handlers"
+    "github.com/leozw/uptime-guardian/internal/api/middleware"
     "github.com/leozw/uptime-guardian/internal/config"
-    "github.com/leozw/uptime-guardian/internal/queue"
-    "github.com/leozw/uptime-guardian/internal/storage/postgres"
-    "github.com/leozw/uptime-guardian/internal/storage/redis"
+    "github.com/leozw/uptime-guardian/internal/db"
+    "github.com/leozw/uptime-guardian/internal/metrics"
+    "github.com/leozw/uptime-guardian/pkg/keycloak"
+    "go.uber.org/zap"
 )
 
 func main() {
-    cfg := config.Load()
-
-    // Database
-    db, err := postgres.NewConnection(cfg.DatabaseURL)
+    // Load configuration
+    cfg, err := config.Load()
     if err != nil {
-        log.Fatal("Failed to connect to database:", err)
+        log.Fatalf("Failed to load config: %v", err)
     }
-    defer db.Close()
 
-    // Redis
-    cache := redis.NewClient(cfg.RedisURL)
-    defer cache.Close()
+    // Setup logger
+    logger, _ := zap.NewProduction()
+    defer logger.Sync()
 
-    // Queue
-    jobQueue := queue.NewRedisQueue(cache.Client)
+    // Database connection
+    database, err := db.NewConnection(cfg.Database.URL)
+    if err != nil {
+        logger.Fatal("Failed to connect to database", zap.Error(err))
+    }
+    defer database.Close()
 
-    // API Server
-    server := api.NewServer(cfg, db, cache, jobQueue)
+    // Run migrations
+    if err := db.RunMigrations(cfg.Database.URL); err != nil {
+        logger.Fatal("Failed to run migrations", zap.Error(err))
+    }
 
+    // Initialize repositories
+    repo := db.NewRepository(database)
+
+    // Initialize Keycloak client
+    keycloakClient := keycloak.NewClient(cfg.Keycloak)
+
+    // Initialize metrics collector
+    metricsCollector := metrics.NewCollector(cfg.Mimir)
+
+    // Setup Gin
+    if cfg.Server.Mode == "release" {
+        gin.SetMode(gin.ReleaseMode)
+    }
+
+    r := gin.New()
+    r.Use(gin.Recovery())
+    r.Use(middleware.Logger(logger))
+    r.Use(middleware.CORS())
+
+    // Setup handlers
+    h := handlers.NewHandler(repo, metricsCollector, keycloakClient, logger)
+
+    // Setup routes
+    api.SetupRoutes(r, h, keycloakClient)
+
+    // Start metrics exporter
+    go metricsCollector.StartRemoteWrite(context.Background())
+
+    // Start server
     srv := &http.Server{
-        Addr:    ":" + cfg.Port,
-        Handler: server.Router,
+        Addr:    fmt.Sprintf(":%s", cfg.Server.Port),
+        Handler: r,
     }
 
     // Graceful shutdown
     go func() {
         if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            log.Fatal("Failed to start server:", err)
+            logger.Fatal("Failed to start server", zap.Error(err))
         }
     }()
 
-    log.Printf("API server started on port %s", cfg.Port)
+    logger.Info("Server started", zap.String("port", cfg.Server.Port))
 
+    // Wait for interrupt signal
     quit := make(chan os.Signal, 1)
     signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
     <-quit
 
-    log.Println("Shutting down server...")
+    logger.Info("Shutting down server...")
 
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
     defer cancel()
 
     if err := srv.Shutdown(ctx); err != nil {
-        log.Fatal("Server forced to shutdown:", err)
+        logger.Fatal("Server forced to shutdown", zap.Error(err))
     }
 
-    log.Println("Server exited")
+    logger.Info("Server exited")
 }

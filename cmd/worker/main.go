@@ -5,112 +5,66 @@ import (
     "log"
     "os"
     "os/signal"
-    "sync"
     "syscall"
-    "time"
 
-    "github.com/leozw/uptime-guardian/internal/checker"
+    "github.com/leozw/uptime-guardian/internal/checks"
     "github.com/leozw/uptime-guardian/internal/config"
+    "github.com/leozw/uptime-guardian/internal/db"
     "github.com/leozw/uptime-guardian/internal/metrics"
-    "github.com/leozw/uptime-guardian/internal/queue"
-    "github.com/leozw/uptime-guardian/internal/storage/postgres"
-    "github.com/leozw/uptime-guardian/internal/storage/redis"
+    "github.com/leozw/uptime-guardian/internal/scheduler"
+    "go.uber.org/zap"
 )
 
 func main() {
-    cfg := config.Load()
-
-    // Database
-    db, err := postgres.NewConnection(cfg.DatabaseURL)
+    // Load configuration
+    cfg, err := config.Load()
     if err != nil {
-        log.Fatal("Failed to connect to database:", err)
+        log.Fatalf("Failed to load config: %v", err)
     }
-    defer db.Close()
 
-    // Redis
-    cache := redis.NewClient(cfg.RedisURL)
-    defer cache.Close()
+    // Setup logger
+    logger, _ := zap.NewProduction()
+    defer logger.Sync()
 
-    // Queue
-    jobQueue := queue.NewRedisQueue(cache.Client)
+    // Database connection
+    database, err := db.NewConnection(cfg.Database.URL)
+    if err != nil {
+        logger.Fatal("Failed to connect to database", zap.Error(err))
+    }
+    defer database.Close()
 
-    // Metrics
-    metricsClient := metrics.NewMimirClient(cfg.MimirURL)
+    // Initialize repositories
+    repo := db.NewRepository(database)
 
-    // Analyzer
-    analyzer := checker.NewAnalyzer()
+    // Initialize metrics collector
+    metricsCollector := metrics.NewCollector(cfg.Mimir)
 
-    // Worker pool
+    // Initialize check runners
+    checkRunners := map[string]checks.Runner{
+        "http":   checks.NewHTTPChecker(),
+        "ssl":    checks.NewSSLChecker(),
+        "dns":    checks.NewDNSChecker(),
+        "domain": checks.NewDomainChecker(),
+    }
+
+    // Initialize scheduler
+    sched := scheduler.NewScheduler(repo, metricsCollector, checkRunners, logger, cfg)
+
+    // Start scheduler
     ctx, cancel := context.WithCancel(context.Background())
-    var wg sync.WaitGroup
+    go sched.Start(ctx)
 
-    numWorkers := cfg.WorkerCount
-    if numWorkers == 0 {
-        numWorkers = 5
-    }
+    // Start metrics exporter
+    go metricsCollector.StartRemoteWrite(ctx)
 
-    for i := 0; i < numWorkers; i++ {
-        wg.Add(1)
-        go func(workerID int) {
-            defer wg.Done()
-            log.Printf("Worker %d started", workerID)
+    logger.Info("Worker started")
 
-            for {
-                select {
-                case <-ctx.Done():
-                    log.Printf("Worker %d stopping", workerID)
-                    return
-                default:
-                    job, err := jobQueue.Pop(ctx, 5*time.Second)
-                    if err != nil {
-                        if err != queue.ErrTimeout {
-                            log.Printf("Worker %d error: %v", workerID, err)
-                        }
-                        continue
-                    }
-
-                    processJob(job, db, analyzer, metricsClient)
-                }
-            }
-        }(i)
-    }
-
-    // Graceful shutdown
+    // Wait for interrupt signal
     quit := make(chan os.Signal, 1)
     signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
     <-quit
 
-    log.Println("Shutting down workers...")
+    logger.Info("Shutting down worker...")
     cancel()
-    wg.Wait()
-    log.Println("All workers stopped")
-}
-
-func processJob(job *queue.Job, db *postgres.DB, analyzer *checker.Analyzer, metrics *metrics.MimirClient) {
-    log.Printf("Processing job: %s for domain %s", job.Type, job.DomainID)
-
-    domain, err := db.GetDomain(job.DomainID, job.TenantID)
-    if err != nil {
-        log.Printf("Failed to get domain: %v", err)
-        return
-    }
-
-    results, err := analyzer.AnalyzeDomain(domain.Name, job.TenantID)
-    if err != nil {
-        log.Printf("Failed to analyze domain: %v", err)
-        return
-    }
-
-    // Save results
-    if err := db.SaveCheckResults(domain.ID, results); err != nil {
-        log.Printf("Failed to save results: %v", err)
-        return
-    }
-
-    // Send metrics
-    if err := metrics.SendDomainMetrics(job.TenantID, domain.Name, results); err != nil {
-        log.Printf("Failed to send metrics: %v", err)
-    }
-
-    log.Printf("Job completed for domain %s", domain.Name)
+    logger.Info("Worker exited")
 }

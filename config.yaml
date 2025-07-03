@@ -1,0 +1,31 @@
+server:
+  port: 8080
+  mode: debug
+
+database:
+  url: postgres://uptime:uptime123@localhost:5432/uptime_guardian?sslmode=disable
+  maxconnections: 25
+  maxidleconns: 5
+
+keycloak:
+  url: https://auth.elvenobservability.com
+  realm: elven-observability
+  client_id: uptime-guardian
+  client_secret: ${KEYCLOAK_CLIENT_SECRET}
+
+mimir:
+  url: https://mimir.elvenobservability.com
+  tenant_header: X-Scope-OrgID
+  batch_size: 1000
+  flush_interval: 10s
+
+scheduler:
+  worker_count: 5
+  check_timeout: 30s
+  max_retries: 3
+
+regions:
+  us-east:
+    name: US East
+    location: Local
+    provider: local

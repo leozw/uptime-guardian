@@ -1,70 +1,108 @@
 package config
 
 import (
-    "os"
-    "strconv"
-    "time"
+	"os"
+	"time"
+
+	"github.com/spf13/viper"
 )
 
 type Config struct {
-    // Server
-    Port    string
-    GinMode string
-    
-    // Database
-    DatabaseURL string
-    
-    // Redis
-    RedisURL string
-    
-    // JWT
-    JWTSecret string
-    
-    // Mimir
-    MimirURL string
-    
-    // Worker
-    WorkerCount int
-    
-    // Timeouts
-    CheckTimeout time.Duration
+	Server    ServerConfig
+	Database  DatabaseConfig
+	Keycloak  KeycloakConfig
+	Mimir     MimirConfig
+	Scheduler SchedulerConfig
+	Regions   map[string]RegionConfig
 }
 
-func Load() *Config {
-    return &Config{
-        Port:         getEnv("PORT", "8080"),
-        GinMode:      getEnv("GIN_MODE", "release"),
-        DatabaseURL:  getEnv("DATABASE_URL", "postgres://localhost/domainmonitor"),
-        RedisURL:     getEnv("REDIS_URL", "redis://localhost:6379"),
-        JWTSecret:    getEnv("JWT_SECRET", "change-me-in-production"),
-        MimirURL:     getEnv("MIMIR_URL", "http://localhost:9009"),
-        WorkerCount:  getEnvAsInt("WORKER_COUNT", 5),
-        CheckTimeout: getEnvAsDuration("CHECK_TIMEOUT", "30s"),
-    }
+type ServerConfig struct {
+	Port string
+	Mode string
 }
 
-func getEnv(key, defaultValue string) string {
-    if value := os.Getenv(key); value != "" {
-        return value
-    }
-    return defaultValue
+type DatabaseConfig struct {
+	URL            string
+	MaxConnections int
+	MaxIdleConns   int
 }
 
-func getEnvAsInt(key string, defaultValue int) int {
-    valueStr := os.Getenv(key)
-    if value, err := strconv.Atoi(valueStr); err == nil {
-        return value
-    }
-    return defaultValue
+type KeycloakConfig struct {
+	URL          string
+	Realm        string
+	ClientID     string
+	ClientSecret string
 }
 
-func getEnvAsDuration(key string, defaultValue string) time.Duration {
-    valueStr := getEnv(key, defaultValue)
-    if duration, err := time.ParseDuration(valueStr); err == nil {
-        return duration
-    }
-    
-    // Fallback to default
-    duration, _ := time.ParseDuration(defaultValue)
-    return duration
+type MimirConfig struct {
+	URL           string
+	TenantHeader  string
+	BatchSize     int
+	FlushInterval time.Duration
+}
+
+type SchedulerConfig struct {
+	WorkerCount  int
+	CheckTimeout time.Duration
+	MaxRetries   int
+}
+
+type RegionConfig struct {
+	Name     string
+	Location string
+	Provider string
+}
+
+func Load() (*Config, error) {
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(".")
+	viper.AddConfigPath("./config")
+	viper.SetEnvPrefix("UPTIME")
+	viper.AutomaticEnv()
+
+	// Set defaults
+	viper.SetDefault("server.port", "8080")
+	viper.SetDefault("server.mode", "debug")
+	viper.SetDefault("database.maxconnections", 25)
+	viper.SetDefault("database.maxidleconns", 5)
+	viper.SetDefault("mimir.tenantheader", "X-Scope-OrgID")
+	viper.SetDefault("mimir.batchsize", 1000)
+	viper.SetDefault("mimir.flushinterval", "10s")
+	viper.SetDefault("scheduler.workercount", 10)
+	viper.SetDefault("scheduler.checktimeout", "30s")
+	viper.SetDefault("scheduler.maxretries", 3)
+
+	var cfg Config
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return nil, err
+		}
+	}
+
+	if err := viper.Unmarshal(&cfg); err != nil {
+		return nil, err
+	}
+
+	// Override with environment variables
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		cfg.Database.URL = url
+	}
+	if url := os.Getenv("KEYCLOAK_URL"); url != "" {
+		cfg.Keycloak.URL = url
+	}
+	if url := os.Getenv("MIMIR_URL"); url != "" {
+		cfg.Mimir.URL = url
+	}
+
+	// Default regions if not configured
+	if len(cfg.Regions) == 0 {
+		cfg.Regions = map[string]RegionConfig{
+			"us-east":  {Name: "US East", Location: "Virginia", Provider: "aws"},
+			"eu-west":  {Name: "EU West", Location: "Ireland", Provider: "aws"},
+			"asia-pac": {Name: "Asia Pacific", Location: "Singapore", Provider: "aws"},
+		}
+	}
+
+	return &cfg, nil
 }
