@@ -39,6 +39,7 @@ type MimirConfig struct {
 	TenantHeader  string
 	BatchSize     int
 	FlushInterval time.Duration
+	AuthToken     string
 }
 
 type SchedulerConfig struct {
@@ -93,6 +94,9 @@ func Load() (*Config, error) {
 	}
 	if url := os.Getenv("MIMIR_URL"); url != "" {
 		cfg.Mimir.URL = url
+	}
+	if token := os.Getenv("MIMIR_AUTH_TOKEN"); token != "" {
+		cfg.Mimir.AuthToken = token
 	}
 
 	// Default regions if not configured

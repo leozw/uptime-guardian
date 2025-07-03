@@ -24,11 +24,11 @@ type Scheduler struct {
 
 func NewScheduler(repo *db.Repository, metrics *metrics.Collector, runners map[string]checks.Runner, logger *zap.Logger, cfg *config.Config) *Scheduler {
 	return &Scheduler{
-		repo:              repo,
-		metrics:           metrics,
-		checkcheckRunners: runners,
-		logger:            logger,
-		config:            cfg,
+		repo:         repo,
+		metrics:      metrics,
+		checkRunners: runners,
+		logger:       logger,
+		config:       cfg,
 	}
 }
 

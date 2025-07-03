@@ -28,7 +28,11 @@ func Auth(kc *keycloak.Client) gin.HandlerFunc {
 
 		claims, err := kc.ValidateToken(token)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+			// Log the actual error for debugging
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "Invalid token",
+				"details": err.Error(), // Remove this in production
+			})
 			c.Abort()
 			return
 		}

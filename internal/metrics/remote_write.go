@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang/snappy"
@@ -14,6 +17,7 @@ import (
 )
 
 func (c *Collector) StartRemoteWrite(ctx context.Context) {
+	log.Printf("Starting remote write to Mimir: %s", c.config.URL)
 	ticker := time.NewTicker(c.config.FlushInterval)
 	defer ticker.Stop()
 
@@ -22,12 +26,16 @@ func (c *Collector) StartRemoteWrite(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.writeToMimir()
+			if err := c.writeToMimir(); err != nil {
+				log.Printf("Error writing to Mimir: %v", err)
+			}
 		}
 	}
 }
 
 func (c *Collector) writeToMimir() error {
+	log.Println("Gathering metrics for Mimir...")
+
 	// Gather metrics
 	mfs, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
@@ -36,7 +44,10 @@ func (c *Collector) writeToMimir() error {
 
 	// Convert to remote write format
 	samples := c.metricsToSamples(mfs)
+	log.Printf("Found %d samples to send to Mimir", len(samples))
+
 	if len(samples) == 0 {
+		log.Println("No samples to send")
 		return nil
 	}
 
@@ -53,6 +64,7 @@ func (c *Collector) writeToMimir() error {
 		}
 	}
 
+	log.Println("Successfully sent metrics to Mimir")
 	return nil
 }
 
@@ -60,6 +72,13 @@ func (c *Collector) metricsToSamples(mfs []*dto.MetricFamily) []prompb.TimeSerie
 	var samples []prompb.TimeSeries
 
 	for _, mf := range mfs {
+		// Skip non-uptime metrics
+		if !strings.HasPrefix(mf.GetName(), "uptime_") &&
+			!strings.HasPrefix(mf.GetName(), "ssl_") &&
+			!strings.HasPrefix(mf.GetName(), "dns_") {
+			continue
+		}
+
 		for _, m := range mf.Metric {
 			// Extract tenant_id from labels
 			var tenantID string
@@ -95,7 +114,7 @@ func (c *Collector) metricsToSamples(mfs []*dto.MetricFamily) []prompb.TimeSerie
 			case dto.MetricType_HISTOGRAM:
 				// For histograms, we need to handle buckets
 				hist := m.Histogram
-				for i, bucket := range hist.Bucket {
+				for _, bucket := range hist.Bucket {
 					bucketLabels := append([]prompb.Label{}, labels...)
 					bucketLabels = append(bucketLabels, prompb.Label{
 						Name:  "le",
@@ -110,6 +129,49 @@ func (c *Collector) metricsToSamples(mfs []*dto.MetricFamily) []prompb.TimeSerie
 						}},
 					})
 				}
+
+				// Add +Inf bucket
+				bucketLabels := append([]prompb.Label{}, labels...)
+				bucketLabels = append(bucketLabels, prompb.Label{
+					Name:  "le",
+					Value: "+Inf",
+				})
+				samples = append(samples, prompb.TimeSeries{
+					Labels: bucketLabels,
+					Samples: []prompb.Sample{{
+						Value:     float64(hist.GetSampleCount()),
+						Timestamp: time.Now().UnixNano() / 1e6,
+					}},
+				})
+
+				// Add sum
+				sumLabels := append([]prompb.Label{}, labels...)
+				sumLabels[len(sumLabels)-1] = prompb.Label{
+					Name:  "__name__",
+					Value: mf.GetName() + "_sum",
+				}
+				samples = append(samples, prompb.TimeSeries{
+					Labels: sumLabels,
+					Samples: []prompb.Sample{{
+						Value:     hist.GetSampleSum(),
+						Timestamp: time.Now().UnixNano() / 1e6,
+					}},
+				})
+
+				// Add count
+				countLabels := append([]prompb.Label{}, labels...)
+				countLabels[len(countLabels)-1] = prompb.Label{
+					Name:  "__name__",
+					Value: mf.GetName() + "_count",
+				}
+				samples = append(samples, prompb.TimeSeries{
+					Labels: countLabels,
+					Samples: []prompb.Sample{{
+						Value:     float64(hist.GetSampleCount()),
+						Timestamp: time.Now().UnixNano() / 1e6,
+					}},
+				})
+
 				continue
 			default:
 				continue
@@ -144,8 +206,12 @@ func (c *Collector) sendBatch(samples []prompb.TimeSeries) error {
 		}
 	}
 
+	log.Printf("Sending metrics for %d tenants", len(byTenant))
+
 	// Send per tenant
 	for tenantID, tenantSamples := range byTenant {
+		log.Printf("Sending %d samples for tenant: %s", len(tenantSamples), tenantID)
+
 		req := &prompb.WriteRequest{
 			Timeseries: tenantSamples,
 		}
@@ -157,7 +223,10 @@ func (c *Collector) sendBatch(samples []prompb.TimeSeries) error {
 
 		compressed := snappy.Encode(nil, data)
 
-		httpReq, err := http.NewRequest("POST", c.config.URL+"/api/v1/push", bytes.NewReader(compressed))
+		url := c.config.URL + "/api/v1/push"
+		log.Printf("Sending to URL: %s with X-Scope-OrgID: %s", url, tenantID)
+
+		httpReq, err := http.NewRequest("POST", url, bytes.NewReader(compressed))
 		if err != nil {
 			return err
 		}
@@ -166,15 +235,36 @@ func (c *Collector) sendBatch(samples []prompb.TimeSeries) error {
 		httpReq.Header.Set("Content-Encoding", "snappy")
 		httpReq.Header.Set(c.config.TenantHeader, tenantID)
 
+		// Adicione o token de autorização do Kong
+		if c.config.AuthToken != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+c.config.AuthToken)
+			log.Printf("Added Authorization header")
+		}
+
+		// Log all headers (mas esconda o token)
+		headers := make(map[string]string)
+		for k, v := range httpReq.Header {
+			if k == "Authorization" {
+				headers[k] = "Bearer ***"
+			} else {
+				headers[k] = strings.Join(v, ", ")
+			}
+		}
+		log.Printf("Request headers: %v", headers)
+
 		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Do(httpReq)
 		if err != nil {
+			log.Printf("Failed to send request: %v", err)
 			return err
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("remote write failed: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Response status: %d, body: %s", resp.StatusCode, string(body))
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			return fmt.Errorf("remote write failed: %s - %s", resp.Status, string(body))
 		}
 	}
 

@@ -10,7 +10,7 @@ database:
 keycloak:
   url: https://auth.elvenobservability.com
   realm: elven-observability
-  client_id: uptime-guardian
+  client_id: customer-fe
   client_secret: ${KEYCLOAK_CLIENT_SECRET}
 
 mimir:

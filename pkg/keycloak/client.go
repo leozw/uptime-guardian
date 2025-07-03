@@ -1,120 +1,146 @@
-package checks
+package keycloak
 
 import (
-    "fmt"
-    "strings"
-    "time"
+	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log"
+	"math/big"
+	"net/http"
+	"time"
 
-    "github.com/likexian/whois"
-    "github.com/leozw/uptime-guardian/internal/db"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/leozw/uptime-guardian/internal/config"
 )
 
-type DomainChecker struct{}
-
-func NewDomainChecker() *DomainChecker {
-    return &DomainChecker{}
+type Client struct {
+	config    config.KeycloakConfig
+	publicKey *rsa.PublicKey
 }
 
-func (d *DomainChecker) Check(monitor *db.Monitor, region string) *db.CheckResult {
-    result := &db.CheckResult{
-        MonitorID: monitor.ID,
-        TenantID:  monitor.TenantID,
-        Region:    region,
-        Details:   make(db.JSONB),
-    }
-    
-    // Clean domain name
-    domain := monitor.Target
-    domain = strings.TrimPrefix(domain, "http://")
-    domain = strings.TrimPrefix(domain, "https://")
-    domain = strings.Split(domain, "/")[0]
-    
-    // Perform WHOIS lookup
-    start := time.Now()
-    whoisResult, err := whois.Whois(domain)
-    duration := time.Since(start)
-    
-    result.ResponseTimeMs = int(duration.Milliseconds())
-    
-    if err != nil {
-        result.Status = db.StatusDown
-        result.Error = fmt.Sprintf("WHOIS lookup failed: %v", err)
-        return result
-    }
-    
-    // Parse WHOIS data
-    expiryDate := d.extractExpiryDate(whoisResult)
-    if expiryDate.IsZero() {
-        result.Status = db.StatusDegraded
-        result.Error = "Could not extract expiry date from WHOIS data"
-        result.Details["whois_data"] = whoisResult
-        return result
-    }
-    
-    result.Details["expiry_date"] = expiryDate.Format(time.RFC3339)
-    
-    // Check if domain is expired
-    now := time.Now()
-    if now.After(expiryDate) {
-        result.Status = db.StatusDown
-        result.Error = "Domain has expired"
-        return result
-    }
-    
-    // Calculate days until expiry
-    daysUntilExpiry := int(expiryDate.Sub(now).Hours() / 24)
-    result.Details["days_until_expiry"] = daysUntilExpiry
-    
-    // Check expiry warning
-    if monitor.Config.DomainMinDaysBeforeExpiry > 0 {
-        if daysUntilExpiry < monitor.Config.DomainMinDaysBeforeExpiry {
-            result.Status = db.StatusDegraded
-            result.Error = fmt.Sprintf("Domain expires in %d days", daysUntilExpiry)
-            return result
-        }
-    }
-    
-    result.Status = db.StatusUp
-    return result
+func NewClient(cfg config.KeycloakConfig) *Client {
+	return &Client{
+		config: cfg,
+	}
 }
 
-func (d *DomainChecker) extractExpiryDate(whoisData string) time.Time {
-    // Common patterns for expiry date in WHOIS data
-    patterns := []string{
-        "Registry Expiry Date:",
-        "Registrar Registration Expiration Date:",
-        "Expiry Date:",
-        "Expiration Date:",
-        "Expires:",
-        "Expiry:",
-        "paid-till:",
-    }
-    
-    lines := strings.Split(whoisData, "\n")
-    for _, line := range lines {
-        line = strings.TrimSpace(line)
-        for _, pattern := range patterns {
-            if strings.HasPrefix(strings.ToLower(line), strings.ToLower(pattern)) {
-                dateStr := strings.TrimSpace(strings.TrimPrefix(line, pattern))
-                
-                // Try various date formats
-                formats := []string{
-                    time.RFC3339,
-                    "2006-01-02T15:04:05Z",
-                    "2006-01-02 15:04:05",
-                    "2006-01-02",
-                    "02-Jan-2006",
-                    "2006.01.02",
-                }
-                
-                for _, format := range formats {
-                    if t, err := time.Parse(format, dateStr); err == nil {
-                        return t
-                    }
-                }
-            }
-        }
-    }
-    
-    return time.Time{}
+func (c *Client) ValidateToken(tokenString string) (jwt.MapClaims, error) {
+	log.Printf("Validating token for Keycloak URL: %s, Realm: %s", c.config.URL, c.config.Realm)
+
+	// Get public key if not cached
+	if c.publicKey == nil {
+		log.Println("Public key not cached, fetching from Keycloak...")
+		if err := c.fetchPublicKey(); err != nil {
+			return nil, fmt.Errorf("failed to fetch public key: %w", err)
+		}
+	}
+
+	// Parse and validate token
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return c.publicKey, nil
+	})
+
+	if err != nil {
+		log.Printf("Failed to parse token: %v", err)
+		return nil, fmt.Errorf("failed to parse token: %w", err)
+	}
+
+	if !token.Valid {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, fmt.Errorf("invalid claims format")
+	}
+
+	// Log successful validation
+	log.Printf("Token validated successfully for user: %v, org: %v", claims["email"], claims["organization"])
+
+	// Validate expiration
+	if exp, ok := claims["exp"].(float64); ok {
+		if time.Now().Unix() > int64(exp) {
+			return nil, fmt.Errorf("token expired")
+		}
+	}
+
+	return claims, nil
+}
+
+func (c *Client) fetchPublicKey() error {
+	url := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/certs", c.config.URL, c.config.Realm)
+	log.Printf("Fetching JWKS from: %s", url)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to fetch jwks: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var jwks struct {
+		Keys []struct {
+			Kid string   `json:"kid"`
+			Kty string   `json:"kty"`
+			Alg string   `json:"alg"`
+			Use string   `json:"use"`
+			N   string   `json:"n"`
+			E   string   `json:"e"`
+			X5c []string `json:"x5c"`
+		} `json:"keys"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
+		return fmt.Errorf("failed to decode jwks: %w", err)
+	}
+
+	log.Printf("Found %d keys in JWKS", len(jwks.Keys))
+
+	if len(jwks.Keys) == 0 {
+		return fmt.Errorf("no keys found in jwks")
+	}
+
+	// Use the first RSA key for signing
+	for _, key := range jwks.Keys {
+		log.Printf("Key: kid=%s, kty=%s, use=%s, alg=%s", key.Kid, key.Kty, key.Use, key.Alg)
+		if key.Kty == "RSA" && key.Use == "sig" {
+			publicKey, err := c.parseJWK(key.N, key.E)
+			if err != nil {
+				log.Printf("Failed to parse key %s: %v", key.Kid, err)
+				continue
+			}
+			c.publicKey = publicKey
+			log.Printf("Successfully loaded RSA public key with kid: %s", key.Kid)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no suitable RSA signing key found")
+}
+
+func (c *Client) parseJWK(n, e string) (*rsa.PublicKey, error) {
+	nBytes, err := base64.RawURLEncoding.DecodeString(n)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode n: %w", err)
+	}
+
+	eBytes, err := base64.RawURLEncoding.DecodeString(e)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode e: %w", err)
+	}
+
+	nBig := new(big.Int).SetBytes(nBytes)
+	eBig := new(big.Int).SetBytes(eBytes)
+
+	return &rsa.PublicKey{
+		N: nBig,
+		E: int(eBig.Int64()),
+	}, nil
 }
