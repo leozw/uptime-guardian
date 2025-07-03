@@ -33,6 +33,10 @@ func SetupRoutes(r *gin.Engine, h *handlers.Handler, kc *keycloak.Client) {
 		monitors.GET("/:id/history", h.GetMonitorHistory)
 		monitors.GET("/:id/incidents", h.GetMonitorIncidents)
 		monitors.GET("/:id/grafana", h.GetGrafanaLink)
+
+		// SLA/SLO endpoints
+		monitors.GET("/:id/sla", h.GetMonitorSLA)
+		monitors.POST("/:id/slo", h.SetMonitorSLO)
 	}
 
 	// Bulk operations
@@ -56,11 +60,6 @@ func SetupRoutes(r *gin.Engine, h *handlers.Handler, kc *keycloak.Client) {
 	// Settings
 	v1.GET("/settings", h.GetSettings)
 	v1.PUT("/settings", h.UpdateSettings)
-
-	// Incidents
-	monitors.GET("/:id/incidents", h.GetMonitorIncidents)
-	monitors.GET("/:id/sla", h.GetMonitorSLA)
-	monitors.POST("/:id/slo", h.SetMonitorSLO)
 
 	// Incident management
 	incidents := v1.Group("/incidents")
