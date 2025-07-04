@@ -204,6 +204,10 @@ func (r *Repository) Ping() error {
 	return r.db.Ping()
 }
 
+func (r *Repository) BeginTx() (*sql.Tx, error) {
+	return r.db.Begin()
+}
+
 // Incident operations
 func (r *Repository) CreateIncident(incident *Incident) error {
 	query := `

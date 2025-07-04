@@ -59,7 +59,8 @@ func (h *Handler) AcknowledgeIncident(c *gin.Context) {
 	tenantID := c.GetString("tenant_id")
 	userEmail := c.GetString("user_email")
 
-	incidentService := incidents.NewService(h.repo, h.logger)
+	// Pass metrics to incident service
+	incidentService := incidents.NewService(h.repo, h.logger, h.metrics)
 
 	if err := incidentService.AcknowledgeIncident(incidentID, tenantID, userEmail); err != nil {
 		h.logger.Error("Failed to acknowledge incident", zap.Error(err))
@@ -84,7 +85,8 @@ func (h *Handler) AddIncidentComment(c *gin.Context) {
 		return
 	}
 
-	incidentService := incidents.NewService(h.repo, h.logger)
+	// Pass metrics to incident service
+	incidentService := incidents.NewService(h.repo, h.logger, h.metrics)
 
 	if err := incidentService.AddIncidentComment(incidentID, tenantID, userEmail, req.Comment); err != nil {
 		h.logger.Error("Failed to add incident comment", zap.Error(err))

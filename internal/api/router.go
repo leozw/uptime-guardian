@@ -53,6 +53,28 @@ func SetupRoutes(r *gin.Engine, h *handlers.Handler, kc *keycloak.Client) {
 		notifications.POST("/test", h.TestNotification)
 	}
 
+	// Monitor Groups
+	groups := v1.Group("/monitor-groups")
+	{
+		groups.GET("", h.ListMonitorGroups)
+		groups.POST("", h.CreateMonitorGroup)
+		groups.GET("/:id", h.GetMonitorGroup)
+		groups.PUT("/:id", h.UpdateMonitorGroup)
+		groups.DELETE("/:id", h.DeleteMonitorGroup)
+
+		// Group members
+		groups.POST("/:id/monitors", h.AddMonitorToGroup)
+		groups.DELETE("/:id/monitors/:monitor_id", h.RemoveMonitorFromGroup)
+
+		// Group status and monitoring
+		groups.GET("/:id/status", h.GetMonitorGroupStatus)
+		groups.GET("/:id/incidents", h.GetMonitorGroupIncidents)
+		groups.POST("/:id/slo", h.SetMonitorGroupSLO)
+
+		// Alert rules
+		groups.POST("/:id/alert-rules", h.CreateGroupAlertRule)
+	}
+
 	// Dashboard/Overview
 	v1.GET("/overview", h.GetOverview)
 	v1.GET("/status-page", h.GetStatusPage)
@@ -60,6 +82,11 @@ func SetupRoutes(r *gin.Engine, h *handlers.Handler, kc *keycloak.Client) {
 	// Settings
 	v1.GET("/settings", h.GetSettings)
 	v1.PUT("/settings", h.UpdateSettings)
+
+	// Metrics endpoints
+	v1.GET("/metrics/summary", h.GetMetricsSummary)
+	v1.GET("/metrics/tenant", h.GetTenantMetrics)
+	monitors.GET("/:id/metrics", h.GetMonitorMetrics)
 
 	// Incident management
 	incidents := v1.Group("/incidents")

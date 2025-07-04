@@ -72,10 +72,11 @@ func (c *Collector) metricsToSamples(mfs []*dto.MetricFamily) []prompb.TimeSerie
 	var samples []prompb.TimeSeries
 
 	for _, mf := range mfs {
-		// Skip non-uptime metrics
+		// Skip non-uptime metrics - updated to include domain_ prefix
 		if !strings.HasPrefix(mf.GetName(), "uptime_") &&
 			!strings.HasPrefix(mf.GetName(), "ssl_") &&
-			!strings.HasPrefix(mf.GetName(), "dns_") {
+			!strings.HasPrefix(mf.GetName(), "dns_") &&
+			!strings.HasPrefix(mf.GetName(), "domain_") {
 			continue
 		}
 

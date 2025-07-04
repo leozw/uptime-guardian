@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/leozw/uptime-guardian/internal/checks"
 	"github.com/leozw/uptime-guardian/internal/db"
+	"github.com/leozw/uptime-guardian/internal/groups"
 	"github.com/leozw/uptime-guardian/internal/incidents"
 	"github.com/leozw/uptime-guardian/internal/metrics"
 	"go.uber.org/zap"
@@ -20,6 +21,7 @@ type Worker struct {
 	checkRunners    map[string]checks.Runner
 	logger          *zap.Logger
 	incidentService *incidents.Service
+	groupService    *groups.Service
 }
 
 func NewWorker(id int, workQueue <-chan *CheckJob, repo *db.Repository, metrics *metrics.Collector, runners map[string]checks.Runner, logger *zap.Logger) *Worker {
@@ -30,7 +32,8 @@ func NewWorker(id int, workQueue <-chan *CheckJob, repo *db.Repository, metrics 
 		metrics:         metrics,
 		checkRunners:    runners,
 		logger:          logger.With(zap.Int("worker_id", id)),
-		incidentService: incidents.NewService(repo, logger),
+		incidentService: incidents.NewService(repo, logger, metrics),
+		groupService:    groups.NewService(repo, logger, metrics),
 	}
 }
 
@@ -95,8 +98,21 @@ func (w *Worker) processJob(job *CheckJob) {
 		)
 	}
 
+	// Update groups this monitor belongs to
+	groups, err := w.repo.GetMonitorGroups(job.Monitor.ID)
+	if err == nil {
+		for _, group := range groups {
+			if err := w.groupService.UpdateGroupStatus(group.ID); err != nil {
+				w.logger.Error("Failed to update group status",
+					zap.Error(err),
+					zap.String("group_id", group.ID),
+				)
+			}
+		}
+	}
+
 	// Process notifications if needed
-	if result.Status == db.StatusDown {
+	if result.Status == db.StatusDown || result.Status == db.StatusDegraded {
 		w.processNotifications(job.Monitor, result)
 	}
 
@@ -108,28 +124,74 @@ func (w *Worker) processJob(job *CheckJob) {
 }
 
 func (w *Worker) processNotifications(monitor *db.Monitor, result *db.CheckResult) {
-	// TODO: Implement notification logic
-	// Check if we need to send notifications based on:
-	// - monitor.NotificationConf.OnFailureCount
-	// - Previous check results
-	// - Active incidents
+	notificationStart := time.Now()
 
 	w.logger.Info("Processing notifications",
 		zap.String("monitor_id", monitor.ID),
 		zap.String("status", string(result.Status)),
 	)
 
-	// For now, just log that we would send notifications
-	if monitor.NotificationConf.Channels != nil {
-		for _, channel := range monitor.NotificationConf.Channels {
-			if channel.Enabled {
-				w.logger.Info("Would send notification",
-					zap.String("channel_type", channel.Type),
-					zap.String("monitor_id", monitor.ID),
-					zap.String("monitor_name", monitor.Name),
-					zap.String("status", string(result.Status)),
-				)
+	// Check if we need to send notifications based on configuration
+	if monitor.NotificationConf.Channels == nil || len(monitor.NotificationConf.Channels) == 0 {
+		return
+	}
+
+	// Get incident information
+	incident, err := w.repo.GetActiveIncident(monitor.ID)
+	if err != nil {
+		w.logger.Error("Failed to get active incident for notifications", zap.Error(err))
+		return
+	}
+
+	// Check if we should send notification based on failure count
+	if incident != nil && incident.AffectedChecks >= monitor.NotificationConf.OnFailureCount {
+		// Check if we've already sent notifications
+		if incident.NotificationsSent == 0 ||
+			(monitor.NotificationConf.ReminderInterval > 0 &&
+				incident.AffectedChecks%monitor.NotificationConf.ReminderInterval == 0) {
+
+			for _, channel := range monitor.NotificationConf.Channels {
+				if channel.Enabled {
+					// Simulate notification sending
+					success := w.sendNotification(channel, monitor, result, incident)
+
+					// Record notification metrics
+					latency := time.Since(notificationStart).Seconds()
+					w.metrics.RecordNotificationSent(
+						monitor.TenantID,
+						monitor.ID,
+						channel.Type,
+						success,
+						latency,
+					)
+
+					if success {
+						incident.NotificationsSent++
+					}
+				}
+			}
+
+			// Update incident with notification count
+			if err := w.repo.UpdateIncident(incident); err != nil {
+				w.logger.Error("Failed to update incident notification count", zap.Error(err))
 			}
 		}
 	}
+}
+
+func (w *Worker) sendNotification(channel db.NotificationChannel, monitor *db.Monitor, result *db.CheckResult, incident *db.Incident) bool {
+	// TODO: Implement actual notification sending based on channel type
+	// For now, just log and simulate
+
+	w.logger.Info("Sending notification",
+		zap.String("channel_type", channel.Type),
+		zap.String("monitor_id", monitor.ID),
+		zap.String("monitor_name", monitor.Name),
+		zap.String("status", string(result.Status)),
+		zap.String("incident_id", incident.ID),
+		zap.Int("downtime_minutes", incident.DowntimeMinutes),
+	)
+
+	// Simulate success/failure (90% success rate)
+	return time.Now().UnixNano()%10 != 0
 }

@@ -6,18 +6,21 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/leozw/uptime-guardian/internal/db"
+	"github.com/leozw/uptime-guardian/internal/metrics"
 	"go.uber.org/zap"
 )
 
 type Service struct {
-	repo   *db.Repository
-	logger *zap.Logger
+	repo    *db.Repository
+	logger  *zap.Logger
+	metrics *metrics.Collector
 }
 
-func NewService(repo *db.Repository, logger *zap.Logger) *Service {
+func NewService(repo *db.Repository, logger *zap.Logger, metrics *metrics.Collector) *Service {
 	return &Service{
-		repo:   repo,
-		logger: logger,
+		repo:    repo,
+		logger:  logger,
+		metrics: metrics,
 	}
 }
 
@@ -65,6 +68,9 @@ func (s *Service) CreateOrUpdateIncident(monitor *db.Monitor, result *db.CheckRe
 				s.logger.Error("Failed to create incident event", zap.Error(err))
 			}
 
+			// Record metrics for new incident
+			s.metrics.RecordIncidentCreated(incident, monitor)
+
 			s.logger.Info("Created new incident",
 				zap.String("incident_id", incident.ID),
 				zap.String("monitor_id", monitor.ID),
@@ -105,6 +111,9 @@ func (s *Service) CreateOrUpdateIncident(monitor *db.Monitor, result *db.CheckRe
 			s.logger.Error("Failed to create resolution event", zap.Error(err))
 		}
 
+		// Record metrics for resolved incident
+		s.metrics.RecordIncidentResolved(activeIncident, monitor)
+
 		s.logger.Info("Resolved incident",
 			zap.String("incident_id", activeIncident.ID),
 			zap.String("monitor_id", monitor.ID),
@@ -137,6 +146,12 @@ func (s *Service) AcknowledgeIncident(incidentID, tenantID, userEmail string) er
 		return fmt.Errorf("incident already acknowledged")
 	}
 
+	// Get monitor for metrics
+	monitor, err := s.repo.GetMonitorByID(incident.MonitorID)
+	if err != nil {
+		s.logger.Error("Failed to get monitor for metrics", zap.Error(err))
+	}
+
 	now := time.Now()
 	incident.AcknowledgedAt = &now
 	incident.AcknowledgedBy = &userEmail
@@ -155,7 +170,16 @@ func (s *Service) AcknowledgeIncident(incidentID, tenantID, userEmail string) er
 		CreatedBy:   &userEmail,
 	}
 
-	return s.repo.CreateIncidentEvent(event)
+	if err := s.repo.CreateIncidentEvent(event); err != nil {
+		return err
+	}
+
+	// Record acknowledgment metrics
+	if monitor != nil {
+		s.metrics.RecordIncidentAcknowledged(incident, monitor)
+	}
+
+	return nil
 }
 
 // AddIncidentComment adiciona um comentário ao incidente
