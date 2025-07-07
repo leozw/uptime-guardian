@@ -291,3 +291,102 @@ func countActiveIncidents(incidents []*db.Incident) int {
 func (h *Handler) RecordCheckQueueMetrics(queueSize int, workerUtilization float64) {
 	h.metrics.RecordWorkerMetrics("default", queueSize, workerUtilization)
 }
+
+// GetMonitorsPerformance returns performance metrics for all monitors
+func (h *Handler) GetMonitorsPerformance(c *gin.Context) {
+	tenantID := c.GetString("tenant_id")
+	
+	// Time range parameters
+	rangeParam := c.DefaultQuery("range", "24h")
+	endTime := time.Now()
+	var startTime time.Time
+	
+	switch rangeParam {
+	case "1h":
+		startTime = endTime.Add(-1 * time.Hour)
+	case "24h":
+		startTime = endTime.Add(-24 * time.Hour)
+	case "7d":
+		startTime = endTime.Add(-7 * 24 * time.Hour)
+	default:
+		startTime = endTime.Add(-24 * time.Hour)
+	}
+	
+	// Get all monitors for tenant
+	monitors, err := h.repo.GetMonitorsByTenant(tenantID, 1000, 0)
+	if err != nil {
+		h.logger.Error("Failed to get monitors", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get monitors"})
+		return
+	}
+	
+	var performanceData []gin.H
+	var totalResponseTime int64
+	var totalChecks int
+	
+	for _, monitor := range monitors {
+		if !monitor.Enabled {
+			continue
+		}
+		
+		// Get recent check history
+		checkHistory, err := h.repo.GetCheckHistoryInPeriod(monitor.ID, tenantID, startTime, endTime)
+		if err != nil {
+			h.logger.Error("Failed to get check history", zap.Error(err))
+			continue
+		}
+		
+		if len(checkHistory) == 0 {
+			continue
+		}
+		
+		// Calculate stats for this monitor
+		var monitorResponseTime int64
+		successfulChecks := 0
+		
+		for _, check := range checkHistory {
+			if check.Status == db.StatusUp {
+				successfulChecks++
+				monitorResponseTime += int64(check.ResponseTimeMs)
+				totalResponseTime += int64(check.ResponseTimeMs)
+			}
+		}
+		
+		totalChecks += successfulChecks
+		
+		avgResponseTime := 0
+		if successfulChecks > 0 {
+			avgResponseTime = int(monitorResponseTime / int64(successfulChecks))
+		}
+		
+		performanceData = append(performanceData, gin.H{
+			"monitor_id":               monitor.ID,
+			"monitor_name":             monitor.Name,
+			"monitor_type":             monitor.Type,
+			"target":                   monitor.Target,
+			"average_response_time_ms": avgResponseTime,
+			"total_checks":             len(checkHistory),
+			"successful_checks":        successfulChecks,
+			"uptime_percentage":        float64(successfulChecks) / float64(len(checkHistory)) * 100,
+		})
+	}
+	
+	// Overall average
+	overallAverage := 0
+	if totalChecks > 0 {
+		overallAverage = int(totalResponseTime / int64(totalChecks))
+	}
+	
+	c.JSON(http.StatusOK, gin.H{
+		"summary": gin.H{
+			"overall_average_response_time_ms": overallAverage,
+			"total_monitors":                   len(performanceData),
+			"total_successful_checks":          totalChecks,
+			"time_range": gin.H{
+				"start": startTime.Format(time.RFC3339),
+				"end":   endTime.Format(time.RFC3339),
+			},
+		},
+		"monitors": performanceData,
+	})
+}

@@ -128,30 +128,40 @@ func (r *Repository) SaveCheckResult(result *CheckResult) error {
 
 	// Insert check result
 	query := `
-        INSERT INTO check_results (
-            id, monitor_id, tenant_id, status, response_time_ms,
-            status_code, error, details, region, checked_at
-        ) VALUES (
-            :id, :monitor_id, :tenant_id, :status, :response_time_ms,
-            :status_code, :error, :details, :region, :checked_at
-        )`
+		INSERT INTO check_results (
+			id, monitor_id, tenant_id, status, response_time_ms,
+			status_code, error, details, region, checked_at
+		) VALUES (
+			:id, :monitor_id, :tenant_id, :status, :response_time_ms,
+			:status_code, :error, :details, :region, :checked_at
+		)`
 
 	_, err = tx.NamedExec(query, result)
 	if err != nil {
 		return err
 	}
 
-	// Update last status
+	// Extract SSL expiry days from details
+	var sslExpiryDays *int
+	if days, ok := result.Details["days_until_expiry"]; ok {
+		if daysFloat, ok := days.(float64); ok {
+			daysInt := int(daysFloat)
+			sslExpiryDays = &daysInt
+		}
+	}
+
+	// Update last status with SSL expiry info
 	statusQuery := `
-        INSERT INTO monitor_last_status (
-            monitor_id, status, message, last_check, response_time_ms
-        ) VALUES (
-            $1, $2, $3, $4, $5
-        ) ON CONFLICT (monitor_id) DO UPDATE SET
-            status = $2,
-            message = $3,
-            last_check = $4,
-            response_time_ms = $5`
+		INSERT INTO monitor_last_status (
+			monitor_id, status, message, last_check, response_time_ms, ssl_expiry_days
+		) VALUES (
+			$1, $2, $3, $4, $5, $6
+		) ON CONFLICT (monitor_id) DO UPDATE SET
+			status = $2,
+			message = $3,
+			last_check = $4,
+			response_time_ms = $5,
+			ssl_expiry_days = $6`
 
 	message := ""
 	if result.Error != "" {
@@ -164,6 +174,7 @@ func (r *Repository) SaveCheckResult(result *CheckResult) error {
 		message,
 		result.CheckedAt,
 		result.ResponseTimeMs,
+		sslExpiryDays,
 	)
 	if err != nil {
 		return err
@@ -386,4 +397,118 @@ func (r *Repository) GetMonitorByID(id string) (*Monitor, error) {
 	query := `SELECT * FROM monitors WHERE id = $1`
 	err := r.db.Get(&m, query, id)
 	return &m, err
+}
+
+// GetIncidentsByTenantWithFilters busca incidents com filtros
+func (r *Repository) GetIncidentsByTenantWithFilters(filters *IncidentFilters) ([]*Incident, error) {
+	incidents := []*Incident{}
+
+	query := `
+		SELECT i.* FROM incidents i
+		JOIN monitors m ON i.monitor_id = m.id
+		WHERE m.tenant_id = $1`
+
+	args := []interface{}{filters.TenantID}
+	argIndex := 2
+
+	if filters.Resolved == "true" {
+		query += " AND i.resolved_at IS NOT NULL"
+	} else if filters.Resolved == "false" {
+		query += " AND i.resolved_at IS NULL"
+	}
+
+	// Filter by severity
+	if filters.Severity != "" {
+		query += fmt.Sprintf(" AND i.severity = $%d", argIndex)
+		args = append(args, filters.Severity)
+		argIndex++
+	}
+
+	// Filter by monitor_id
+	if filters.MonitorID != "" {
+		query += fmt.Sprintf(" AND i.monitor_id = $%d", argIndex)
+		args = append(args, filters.MonitorID)
+		argIndex++
+	}
+
+	// Filter by date range
+	if filters.StartDate != nil {
+		query += fmt.Sprintf(" AND i.started_at >= $%d", argIndex)
+		args = append(args, *filters.StartDate)
+		argIndex++
+	}
+
+	if filters.EndDate != nil {
+		query += fmt.Sprintf(" AND i.started_at <= $%d", argIndex)
+		args = append(args, filters.EndDate.Add(24*time.Hour-time.Second)) // End of day
+		argIndex++
+	}
+
+	query += " ORDER BY i.started_at DESC"
+	query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIndex, argIndex+1)
+	args = append(args, filters.Limit, filters.Offset)
+
+	err := r.db.Select(&incidents, query, args...)
+	return incidents, err
+}
+
+// CountIncidentsByTenantWithFilters conta incidents com filtros
+func (r *Repository) CountIncidentsByTenantWithFilters(filters *IncidentFilters) (int, error) {
+	var count int
+
+	query := `
+		SELECT COUNT(*) FROM incidents i
+		JOIN monitors m ON i.monitor_id = m.id
+		WHERE m.tenant_id = $1`
+
+	args := []interface{}{filters.TenantID}
+	argIndex := 2
+
+	// Apply same filters as above (without LIMIT/OFFSET)
+	if filters.Resolved == "true" {
+		query += " AND i.resolved_at IS NOT NULL"
+	} else if filters.Resolved == "false" {
+		query += " AND i.resolved_at IS NULL"
+	}
+
+	if filters.Severity != "" {
+		query += fmt.Sprintf(" AND i.severity = $%d", argIndex)
+		args = append(args, filters.Severity)
+		argIndex++
+	}
+
+	if filters.MonitorID != "" {
+		query += fmt.Sprintf(" AND i.monitor_id = $%d", argIndex)
+		args = append(args, filters.MonitorID)
+		argIndex++
+	}
+
+	if filters.StartDate != nil {
+		query += fmt.Sprintf(" AND i.started_at >= $%d", argIndex)
+		args = append(args, *filters.StartDate)
+		argIndex++
+	}
+
+	if filters.EndDate != nil {
+		query += fmt.Sprintf(" AND i.started_at <= $%d", argIndex)
+		args = append(args, filters.EndDate.Add(24*time.Hour-time.Second))
+		argIndex++
+	}
+
+	err := r.db.Get(&count, query, args...)
+	return count, err
+}
+
+// GetCheckHistoryInPeriod busca histórico de checks em um período
+func (r *Repository) GetCheckHistoryInPeriod(monitorID, tenantID string, startTime, endTime time.Time) ([]*CheckResult, error) {
+	results := []*CheckResult{}
+	query := `
+		SELECT r.* FROM check_results r
+		JOIN monitors m ON r.monitor_id = m.id
+		WHERE r.monitor_id = $1 AND m.tenant_id = $2
+		AND r.checked_at >= $3 AND r.checked_at <= $4
+		ORDER BY r.checked_at DESC`
+
+	err := r.db.Select(&results, query, monitorID, tenantID, startTime, endTime)
+	return results, err
 }

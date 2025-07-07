@@ -218,3 +218,14 @@ const (
 	IncidentEventResolved      = "resolved"
 	IncidentEventComment       = "comment"
 )
+
+type IncidentFilters struct {
+	TenantID  string
+	Resolved  string     // "true", "false", ou vazio
+	Severity  string     // "critical", "warning", "info"
+	MonitorID string     // UUID do monitor
+	StartDate *time.Time // Data início (opcional)
+	EndDate   *time.Time // Data fim (opcional)
+	Limit     int
+	Offset    int
+}

@@ -174,3 +174,68 @@ func (h *Handler) SetMonitorSLO(c *gin.Context) {
 
 	c.JSON(http.StatusOK, slo)
 }
+
+func (h *Handler) ListAllIncidents(c *gin.Context) {
+	tenantID := c.GetString("tenant_id")
+
+	// Pagination
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+
+	offset := (page - 1) * limit
+
+	// Filters
+	filters := &db.IncidentFilters{
+		TenantID:  tenantID,
+		Resolved:  c.Query("resolved"),   // "true", "false", ou vazio (todos)
+		Severity:  c.Query("severity"),   // "critical", "warning", "info"
+		MonitorID: c.Query("monitor_id"), // UUID do monitor
+		Limit:     limit,
+		Offset:    offset,
+	}
+
+	// Date range filters
+	if startDate := c.Query("start_date"); startDate != "" {
+		if t, err := time.Parse("2006-01-02", startDate); err == nil {
+			filters.StartDate = &t
+		}
+	}
+
+	if endDate := c.Query("end_date"); endDate != "" {
+		if t, err := time.Parse("2006-01-02", endDate); err == nil {
+			filters.EndDate = &t
+		}
+	}
+
+	incidents, err := h.repo.GetIncidentsByTenantWithFilters(filters)
+	if err != nil {
+		h.logger.Error("Failed to list incidents", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	total, _ := h.repo.CountIncidentsByTenantWithFilters(filters)
+
+	c.JSON(http.StatusOK, gin.H{
+		"incidents": incidents,
+		"pagination": gin.H{
+			"page":  page,
+			"limit": limit,
+			"total": total,
+		},
+		"filters": gin.H{
+			"resolved":   filters.Resolved,
+			"severity":   filters.Severity,
+			"monitor_id": filters.MonitorID,
+			"start_date": c.Query("start_date"),
+			"end_date":   c.Query("end_date"),
+		},
+	})
+}

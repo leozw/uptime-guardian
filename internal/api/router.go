@@ -85,12 +85,14 @@ func SetupRoutes(r *gin.Engine, h *handlers.Handler, kc *keycloak.Client) {
 
 	// Metrics endpoints
 	v1.GET("/metrics/summary", h.GetMetricsSummary)
+	v1.GET("/metrics/performance", h.GetMonitorsPerformance)
 	v1.GET("/metrics/tenant", h.GetTenantMetrics)
 	monitors.GET("/:id/metrics", h.GetMonitorMetrics)
 
 	// Incident management
 	incidents := v1.Group("/incidents")
 	{
+		incidents.GET("", h.ListAllIncidents)
 		incidents.GET("/:incident_id", h.GetIncidentDetails)
 		incidents.POST("/:incident_id/acknowledge", h.AcknowledgeIncident)
 		incidents.POST("/:incident_id/comment", h.AddIncidentComment)
