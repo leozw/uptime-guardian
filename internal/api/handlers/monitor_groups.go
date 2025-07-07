@@ -38,12 +38,20 @@ type GroupAlertRuleRequest struct {
 func (h *Handler) CreateMonitorGroup(c *gin.Context) {
 	var req CreateMonitorGroupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.Error("Invalid request", zap.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	tenantID := c.GetString("tenant_id")
 	userEmail := c.GetString("user_email")
+
+	h.logger.Info("Creating monitor group",
+		zap.String("tenant_id", tenantID),
+		zap.String("user_email", userEmail),
+		zap.String("group_name", req.Name),
+		zap.Int("members_count", len(req.Members)),
+	)
 
 	// Validate quota
 	count, err := h.repo.CountMonitorGroupsByTenant(tenantID)
@@ -59,31 +67,56 @@ func (h *Handler) CreateMonitorGroup(c *gin.Context) {
 		return
 	}
 
-	// Validate members
+	// Validate members ANTES de iniciar a transação
 	totalWeight := 0.0
+	validatedMembers := make([]GroupMemberRequest, 0, len(req.Members))
+
 	for _, member := range req.Members {
 		totalWeight += member.Weight
 
 		// Verify monitor exists and belongs to tenant
 		monitor, err := h.repo.GetMonitor(member.MonitorID, tenantID)
 		if err != nil {
+			h.logger.Error("Monitor not found for group member",
+				zap.String("monitor_id", member.MonitorID),
+				zap.String("tenant_id", tenantID),
+				zap.Error(err),
+			)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Monitor not found: " + member.MonitorID})
 			return
 		}
 		if monitor == nil {
+			h.logger.Error("Monitor is nil",
+				zap.String("monitor_id", member.MonitorID),
+				zap.String("tenant_id", tenantID),
+			)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid monitor: " + member.MonitorID})
 			return
 		}
+
+		h.logger.Debug("Validated monitor for group",
+			zap.String("monitor_id", member.MonitorID),
+			zap.String("monitor_name", monitor.Name),
+			zap.Float64("weight", member.Weight),
+			zap.Bool("is_critical", member.IsCritical),
+		)
+
+		validatedMembers = append(validatedMembers, member)
 	}
 
 	// Weights should sum to approximately 1.0
-	if len(req.Members) > 0 && (totalWeight < 0.95 || totalWeight > 1.05) {
+	if len(validatedMembers) > 0 && (totalWeight < 0.95 || totalWeight > 1.05) {
+		h.logger.Error("Invalid total weight",
+			zap.Float64("total_weight", totalWeight),
+			zap.Int("members_count", len(validatedMembers)),
+		)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Member weights must sum to 1.0"})
 		return
 	}
 
+	groupID := uuid.New().String()
 	group := &db.MonitorGroup{
-		ID:          uuid.New().String(),
+		ID:          groupID,
 		TenantID:    tenantID,
 		Name:        req.Name,
 		Description: req.Description,
@@ -98,14 +131,23 @@ func (h *Handler) CreateMonitorGroup(c *gin.Context) {
 		group.NotificationConf = *req.NotificationConf
 	}
 
-	// Start transaction
+	// Start transaction - CORRIGIDO para usar sqlx
 	tx, err := h.repo.BeginTx()
 	if err != nil {
 		h.logger.Error("Failed to start transaction", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create monitor group"})
 		return
 	}
-	defer tx.Rollback()
+
+	// Usar defer para garantir rollback em caso de erro
+	committed := false
+	defer func() {
+		if !committed {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				h.logger.Error("Failed to rollback transaction", zap.Error(rollbackErr))
+			}
+		}
+	}()
 
 	// Create group
 	if err := h.repo.CreateMonitorGroup(group); err != nil {
@@ -114,36 +156,76 @@ func (h *Handler) CreateMonitorGroup(c *gin.Context) {
 		return
 	}
 
+	h.logger.Info("Created monitor group",
+		zap.String("group_id", group.ID),
+		zap.String("group_name", group.Name),
+	)
+
 	// Add members
-	for _, member := range req.Members {
+	for i, member := range validatedMembers {
+		h.logger.Debug("Adding member to group",
+			zap.Int("member_index", i),
+			zap.String("monitor_id", member.MonitorID),
+			zap.String("group_id", group.ID),
+			zap.Float64("weight", member.Weight),
+			zap.Bool("is_critical", member.IsCritical),
+		)
+
 		if err := h.repo.AddMonitorToGroup(group.ID, member.MonitorID, member.Weight, member.IsCritical); err != nil {
-			h.logger.Error("Failed to add monitor to group", zap.Error(err))
+			h.logger.Error("Failed to add monitor to group",
+				zap.Error(err),
+				zap.String("monitor_id", member.MonitorID),
+				zap.String("group_id", group.ID),
+			)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add monitors to group"})
 			return
 		}
+
+		h.logger.Debug("Successfully added member to group",
+			zap.String("monitor_id", member.MonitorID),
+			zap.String("group_id", group.ID),
+		)
 	}
 
+	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		h.logger.Error("Failed to commit transaction", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create monitor group"})
 		return
 	}
+	committed = true
 
-	h.logger.Info("Monitor group created",
+	h.logger.Info("Monitor group created successfully",
 		zap.String("group_id", group.ID),
 		zap.String("tenant_id", tenantID),
 		zap.String("user", userEmail),
+		zap.Int("members_added", len(validatedMembers)),
 	)
 
-	// Load members
-	group.Members = make([]db.MonitorGroupMember, len(req.Members))
-	for i, member := range req.Members {
-		group.Members[i] = db.MonitorGroupMember{
-			GroupID:    group.ID,
-			MonitorID:  member.MonitorID,
-			Weight:     member.Weight,
-			IsCritical: member.IsCritical,
+	// Load members from database for accurate response
+	members, err := h.repo.GetGroupMembers(group.ID)
+	if err != nil {
+		h.logger.Error("Failed to load group members for response", zap.Error(err))
+		// Fallback to basic member info
+		group.Members = make([]db.MonitorGroupMember, len(validatedMembers))
+		for i, member := range validatedMembers {
+			group.Members[i] = db.MonitorGroupMember{
+				GroupID:    group.ID,
+				MonitorID:  member.MonitorID,
+				Weight:     member.Weight,
+				IsCritical: member.IsCritical,
+			}
 		}
+	} else {
+		// Use real data from database
+		group.Members = make([]db.MonitorGroupMember, len(members))
+		for i, member := range members {
+			group.Members[i] = *member
+		}
+		h.logger.Info("Loaded group members from database",
+			zap.String("group_id", group.ID),
+			zap.Int("members_loaded", len(members)),
+		)
 	}
 
 	c.JSON(http.StatusCreated, group)

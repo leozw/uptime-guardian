@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // Monitor Group operations
@@ -19,7 +21,10 @@ func (r *Repository) CreateMonitorGroup(g *MonitorGroup) error {
 		)`
 
 	_, err := r.db.NamedExec(query, g)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to create monitor group: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) GetMonitorGroup(id, tenantID string) (*MonitorGroup, error) {
@@ -29,7 +34,10 @@ func (r *Repository) GetMonitorGroup(id, tenantID string) (*MonitorGroup, error)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("monitor group not found")
 	}
-	return &g, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get monitor group: %w", err)
+	}
+	return &g, nil
 }
 
 func (r *Repository) GetMonitorGroupsByTenant(tenantID string, limit, offset int) ([]*MonitorGroup, error) {
@@ -41,7 +49,10 @@ func (r *Repository) GetMonitorGroupsByTenant(tenantID string, limit, offset int
 		LIMIT $2 OFFSET $3`
 
 	err := r.db.Select(&groups, query, tenantID, limit, offset)
-	return groups, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get monitor groups: %w", err)
+	}
+	return groups, nil
 }
 
 func (r *Repository) UpdateMonitorGroup(g *MonitorGroup) error {
@@ -56,20 +67,39 @@ func (r *Repository) UpdateMonitorGroup(g *MonitorGroup) error {
 		WHERE id = :id AND tenant_id = :tenant_id`
 
 	_, err := r.db.NamedExec(query, g)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update monitor group: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) DeleteMonitorGroup(id, tenantID string) error {
 	query := `DELETE FROM monitor_groups WHERE id = $1 AND tenant_id = $2`
-	_, err := r.db.Exec(query, id, tenantID)
-	return err
+	result, err := r.db.Exec(query, id, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to delete monitor group: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("monitor group not found")
+	}
+
+	return nil
 }
 
 func (r *Repository) CountMonitorGroupsByTenant(tenantID string) (int, error) {
 	var count int
 	query := `SELECT COUNT(*) FROM monitor_groups WHERE tenant_id = $1`
 	err := r.db.Get(&count, query, tenantID)
-	return count, err
+	if err != nil {
+		return 0, fmt.Errorf("failed to count monitor groups: %w", err)
+	}
+	return count, nil
 }
 
 // Monitor Group Member operations
@@ -77,27 +107,66 @@ func (r *Repository) CountMonitorGroupsByTenant(tenantID string) (int, error) {
 func (r *Repository) AddMonitorToGroup(groupID, monitorID string, weight float64, isCritical bool) error {
 	query := `
 		INSERT INTO monitor_group_members (
-			group_id, monitor_id, weight, is_critical, added_at
+			id, group_id, monitor_id, weight, is_critical, added_at
 		) VALUES (
-			$1, $2, $3, $4, $5
+			uuid_generate_v4(), $1, $2, $3, $4, $5
 		) ON CONFLICT (group_id, monitor_id) DO UPDATE SET
 			weight = $3,
-			is_critical = $4`
+			is_critical = $4,
+			added_at = $5`
 
 	_, err := r.db.Exec(query, groupID, monitorID, weight, isCritical, time.Now())
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to add monitor to group: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) RemoveMonitorFromGroup(groupID, monitorID string) error {
 	query := `DELETE FROM monitor_group_members WHERE group_id = $1 AND monitor_id = $2`
-	_, err := r.db.Exec(query, groupID, monitorID)
-	return err
+	result, err := r.db.Exec(query, groupID, monitorID)
+	if err != nil {
+		return fmt.Errorf("failed to remove monitor from group: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("monitor not found in group")
+	}
+
+	return nil
 }
 
 func (r *Repository) GetGroupMembers(groupID string) ([]*MonitorGroupMember, error) {
 	members := []*MonitorGroupMember{}
+
 	query := `
-		SELECT mgm.*, m.* 
+		SELECT 
+			mgm.id as member_id,
+			mgm.group_id,
+			mgm.monitor_id,
+			mgm.weight,
+			mgm.is_critical,
+			mgm.added_at,
+			m.id,
+			m.tenant_id,
+			m.name,
+			m.type,
+			m.target,
+			m.enabled,
+			m.interval,
+			m.timeout,
+			m.regions,
+			m.config,
+			m.notification_config,
+			m.tags,
+			m.created_at,
+			m.updated_at,
+			m.created_by
 		FROM monitor_group_members mgm
 		JOIN monitors m ON mgm.monitor_id = m.id
 		WHERE mgm.group_id = $1
@@ -105,7 +174,7 @@ func (r *Repository) GetGroupMembers(groupID string) ([]*MonitorGroupMember, err
 
 	rows, err := r.db.Query(query, groupID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to query group members: %w", err)
 	}
 	defer rows.Close()
 
@@ -123,11 +192,15 @@ func (r *Repository) GetGroupMembers(groupID string) ([]*MonitorGroupMember, err
 			&monitor.CreatedAt, &monitor.UpdatedAt, &monitor.CreatedBy,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan member row: %w", err)
 		}
 
 		member.Monitor = &monitor
 		members = append(members, &member)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 
 	return members, nil
@@ -142,7 +215,20 @@ func (r *Repository) GetMonitorGroups(monitorID string) ([]*MonitorGroup, error)
 		ORDER BY g.name`
 
 	err := r.db.Select(&groups, query, monitorID)
-	return groups, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get monitor groups: %w", err)
+	}
+
+	// Debug log para verificar grupos encontrados
+	// TODO: Remover depois de debugar
+	if len(groups) > 0 {
+		fmt.Printf("DEBUG: Found %d groups for monitor %s\n", len(groups), monitorID)
+		for _, g := range groups {
+			fmt.Printf("DEBUG: Group ID: %s, Name: %s, TenantID: %s\n", g.ID, g.Name, g.TenantID)
+		}
+	}
+
+	return groups, nil
 }
 
 // Monitor Group Status operations
@@ -168,7 +254,10 @@ func (r *Repository) SaveGroupStatus(status *MonitorGroupStatus) error {
 			message = :message`
 
 	_, err := r.db.NamedExec(query, status)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to save group status: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) GetGroupStatus(groupID string) (*MonitorGroupStatus, error) {
@@ -178,7 +267,10 @@ func (r *Repository) GetGroupStatus(groupID string) (*MonitorGroupStatus, error)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("group status not found")
 	}
-	return &status, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group status: %w", err)
+	}
+	return &status, nil
 }
 
 // Monitor Group SLO operations
@@ -200,7 +292,10 @@ func (r *Repository) CreateOrUpdateGroupSLO(slo *MonitorGroupSLO) error {
 			updated_at = :updated_at`
 
 	_, err := r.db.NamedExec(query, slo)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to create/update group SLO: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) GetGroupSLO(groupID string) (*MonitorGroupSLO, error) {
@@ -210,7 +305,10 @@ func (r *Repository) GetGroupSLO(groupID string) (*MonitorGroupSLO, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return &slo, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group SLO: %w", err)
+	}
+	return &slo, nil
 }
 
 // Monitor Group Alert Rules operations
@@ -228,7 +326,10 @@ func (r *Repository) CreateGroupAlertRule(rule *MonitorGroupAlertRule) error {
 		)`
 
 	_, err := r.db.NamedExec(query, rule)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to create group alert rule: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) GetGroupAlertRules(groupID string) ([]*MonitorGroupAlertRule, error) {
@@ -239,7 +340,10 @@ func (r *Repository) GetGroupAlertRules(groupID string) ([]*MonitorGroupAlertRul
 		ORDER BY created_at`
 
 	err := r.db.Select(&rules, query, groupID)
-	return rules, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group alert rules: %w", err)
+	}
+	return rules, nil
 }
 
 func (r *Repository) UpdateGroupAlertRule(rule *MonitorGroupAlertRule) error {
@@ -255,13 +359,29 @@ func (r *Repository) UpdateGroupAlertRule(rule *MonitorGroupAlertRule) error {
 		WHERE id = :id`
 
 	_, err := r.db.NamedExec(query, rule)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update group alert rule: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) DeleteGroupAlertRule(id string) error {
 	query := `DELETE FROM monitor_group_alert_rules WHERE id = $1`
-	_, err := r.db.Exec(query, id)
-	return err
+	result, err := r.db.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete group alert rule: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("alert rule not found")
+	}
+
+	return nil
 }
 
 // Monitor Group Incident operations
@@ -279,7 +399,10 @@ func (r *Repository) CreateGroupIncident(incident *MonitorGroupIncident) error {
 		)`
 
 	_, err := r.db.NamedExec(query, incident)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to create group incident: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) GetActiveGroupIncident(groupID string) (*MonitorGroupIncident, error) {
@@ -294,7 +417,10 @@ func (r *Repository) GetActiveGroupIncident(groupID string) (*MonitorGroupIncide
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("no active group incident")
 	}
-	return &incident, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get active group incident: %w", err)
+	}
+	return &incident, nil
 }
 
 func (r *Repository) UpdateGroupIncident(incident *MonitorGroupIncident) error {
@@ -308,7 +434,10 @@ func (r *Repository) UpdateGroupIncident(incident *MonitorGroupIncident) error {
 		WHERE id = :id`
 
 	_, err := r.db.NamedExec(query, incident)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update group incident: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) GetGroupIncidents(groupID, tenantID string, limit int) ([]*MonitorGroupIncident, error) {
@@ -320,7 +449,10 @@ func (r *Repository) GetGroupIncidents(groupID, tenantID string, limit int) ([]*
 		LIMIT $3`
 
 	err := r.db.Select(&incidents, query, groupID, tenantID, limit)
-	return incidents, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group incidents: %w", err)
+	}
+	return incidents, nil
 }
 
 // Monitor Group SLA Report operations
@@ -343,7 +475,10 @@ func (r *Repository) CreateGroupSLAReport(report *MonitorGroupSLAReport) error {
 			slo_met = :slo_met`
 
 	_, err := r.db.NamedExec(query, report)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to create group SLA report: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) GetGroupSLAReports(groupID string, limit int) ([]*MonitorGroupSLAReport, error) {
@@ -355,7 +490,10 @@ func (r *Repository) GetGroupSLAReports(groupID string, limit int) ([]*MonitorGr
 		LIMIT $2`
 
 	err := r.db.Select(&reports, query, groupID, limit)
-	return reports, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group SLA reports: %w", err)
+	}
+	return reports, nil
 }
 
 // Helper function to get all group statuses for a tenant
@@ -368,7 +506,7 @@ func (r *Repository) GetAllGroupStatuses(tenantID string) (map[string]*MonitorGr
 
 	rows, err := r.db.Query(query, tenantID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get all group statuses: %w", err)
 	}
 	defer rows.Close()
 
@@ -380,10 +518,28 @@ func (r *Repository) GetAllGroupStatuses(tenantID string) (map[string]*MonitorGr
 			&status.CriticalMonitorsDown, &status.LastCheck, &status.Message,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan group status: %w", err)
 		}
 		statuses[status.GroupID] = &status
 	}
 
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating group status rows: %w", err)
+	}
+
 	return statuses, nil
+}
+
+// Debug methods
+func (r *Repository) QueryRows(query string, args ...interface{}) (*sql.Rows, error) {
+	return r.db.Query(query, args...)
+}
+
+func (r *Repository) ExecQuery(query string, args ...interface{}) (sql.Result, error) {
+	return r.db.Exec(query, args...)
+}
+
+// GetDB returns the underlying database connection for debug purposes
+func (r *Repository) GetDB() *sqlx.DB {
+	return r.db
 }

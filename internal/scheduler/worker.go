@@ -98,14 +98,76 @@ func (w *Worker) processJob(job *CheckJob) {
 		)
 	}
 
-	// Update groups this monitor belongs to
+	// Update groups this monitor belongs to - MELHORADO
 	groups, err := w.repo.GetMonitorGroups(job.Monitor.ID)
-	if err == nil {
+	if err != nil {
+		w.logger.Debug("No groups found for monitor or error getting groups",
+			zap.String("monitor_id", job.Monitor.ID),
+			zap.Error(err),
+		)
+	} else {
+		w.logger.Debug("Found groups for monitor",
+			zap.String("monitor_id", job.Monitor.ID),
+			zap.Int("groups_count", len(groups)),
+		)
+
 		for _, group := range groups {
+			w.logger.Debug("Processing group update",
+				zap.String("group_id", group.ID),
+				zap.String("group_name", group.Name),
+				zap.String("group_tenant_id", group.TenantID),
+				zap.String("monitor_id", job.Monitor.ID),
+			)
+
+			// NOVO DEBUG: Verificar se o grupo ainda existe antes de tentar atualizar
+			// Usar o tenant_id correto do grupo E testar sem tenant_id
+			groupFromDB, err := w.repo.GetMonitorGroup(group.ID, group.TenantID)
+			if err != nil {
+				w.logger.Warn("Group not found with tenant_id, trying without tenant restriction",
+					zap.String("group_id", group.ID),
+					zap.String("group_name", group.Name),
+					zap.String("group_tenant_id", group.TenantID),
+					zap.String("monitor_id", job.Monitor.ID),
+					zap.Error(err),
+				)
+
+				// Testar busca direta sem tenant_id para debug
+				var testGroup interface{}
+				testQuery := "SELECT id, name, tenant_id FROM monitor_groups WHERE id = $1"
+				if testErr := w.repo.GetDB().Get(&testGroup, testQuery, group.ID); testErr != nil {
+					w.logger.Error("Group does not exist in database at all",
+						zap.String("group_id", group.ID),
+						zap.Error(testErr),
+					)
+				} else {
+					w.logger.Error("Group exists in database but GetMonitorGroup failed - TENANT_ID MISMATCH!",
+						zap.String("group_id", group.ID),
+						zap.String("expected_tenant", group.TenantID),
+						zap.Any("actual_group_data", testGroup),
+					)
+				}
+				continue
+			}
+
+			w.logger.Debug("Group found successfully, updating status",
+				zap.String("group_id", group.ID),
+				zap.String("group_name", groupFromDB.Name),
+				zap.String("group_tenant_id", groupFromDB.TenantID),
+			)
+
 			if err := w.groupService.UpdateGroupStatus(group.ID); err != nil {
-				w.logger.Error("Failed to update group status",
+				// Log como warning ao invés de error, para não poluir os logs
+				w.logger.Warn("Failed to update group status",
 					zap.Error(err),
 					zap.String("group_id", group.ID),
+					zap.String("group_name", group.Name),
+					zap.String("monitor_id", job.Monitor.ID),
+				)
+			} else {
+				w.logger.Debug("Successfully updated group status",
+					zap.String("group_id", group.ID),
+					zap.String("group_name", group.Name),
+					zap.String("monitor_id", job.Monitor.ID),
 				)
 			}
 		}
@@ -130,11 +192,6 @@ func (w *Worker) processNotifications(monitor *db.Monitor, result *db.CheckResul
 		zap.String("monitor_id", monitor.ID),
 		zap.String("status", string(result.Status)),
 	)
-
-	// Check if we need to send notifications based on configuration
-	if monitor.NotificationConf.Channels == nil || len(monitor.NotificationConf.Channels) == 0 {
-		return
-	}
 
 	// Get incident information
 	incident, err := w.repo.GetActiveIncident(monitor.ID)
