@@ -90,9 +90,33 @@ func (r *Repository) UpdateMonitor(m *Monitor) error {
 }
 
 func (r *Repository) DeleteMonitor(id, tenantID string) error {
-	query := `DELETE FROM monitors WHERE id = $1 AND tenant_id = $2`
-	_, err := r.db.Exec(query, id, tenantID)
-	return err
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Remove from groups first
+	_, err = tx.Exec(`DELETE FROM monitor_group_members WHERE monitor_id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("failed to remove monitor from groups: %w", err)
+	}
+
+	result, err := tx.Exec(`DELETE FROM monitors WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to delete monitor: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("monitor not found")
+	}
+
+	return tx.Commit()
 }
 
 func (r *Repository) CountMonitorsByTenant(tenantID string) (int, error) {
@@ -215,8 +239,8 @@ func (r *Repository) Ping() error {
 	return r.db.Ping()
 }
 
-func (r *Repository) BeginTx() (*sql.Tx, error) {
-	return r.db.Begin()
+func (r *Repository) BeginTx() (*sqlx.Tx, error) {
+	return r.db.Beginx()
 }
 
 // Incident operations
@@ -511,4 +535,8 @@ func (r *Repository) GetCheckHistoryInPeriod(monitorID, tenantID string, startTi
 
 	err := r.db.Select(&results, query, monitorID, tenantID, startTime, endTime)
 	return results, err
+}
+
+func (r *Repository) GetDB() *sqlx.DB {
+	return r.db
 }

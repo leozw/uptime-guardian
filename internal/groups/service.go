@@ -25,9 +25,10 @@ func NewService(repo *db.Repository, logger *zap.Logger, metrics *metrics.Collec
 }
 
 // UpdateGroupStatus calculates and updates the status for a monitor group
-func (s *Service) UpdateGroupStatus(groupID string) error {
-	// Get group
-	group, err := s.repo.GetMonitorGroup(groupID, "")
+// CORREÇÃO: Agora aceita tenantID como parâmetro
+func (s *Service) UpdateGroupStatus(groupID, tenantID string) error {
+	// Get group COM tenant_id
+	group, err := s.repo.GetMonitorGroup(groupID, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to get monitor group: %w", err)
 	}
@@ -299,8 +300,12 @@ func (s *Service) determineSeverity(status *db.MonitorGroupStatus) string {
 
 func (s *Service) sendGroupNotifications(group *db.MonitorGroup, incident *db.MonitorGroupIncident, rule *db.MonitorGroupAlertRule, status *db.MonitorGroupStatus) {
 	// Use rule's notification channels if available, otherwise use group's default
-	channels := rule.NotificationChannels
-	if len(channels) == 0 && group.NotificationConf.Channels != nil {
+	var channels []db.NotificationChannel
+
+	// CORRIGIDO: Convertendo NotificationChannels para []NotificationChannel
+	if len(rule.NotificationChannels) > 0 {
+		channels = []db.NotificationChannel(rule.NotificationChannels)
+	} else if group.NotificationConf.Channels != nil {
 		channels = group.NotificationConf.Channels
 	}
 
@@ -341,7 +346,7 @@ func (s *Service) UpdateAllGroupStatuses(tenantID string) error {
 
 	for _, group := range groups {
 		if group.Enabled {
-			if err := s.UpdateGroupStatus(group.ID); err != nil {
+			if err := s.UpdateGroupStatus(group.ID, group.TenantID); err != nil {
 				s.logger.Error("Failed to update group status",
 					zap.String("group_id", group.ID),
 					zap.Error(err),

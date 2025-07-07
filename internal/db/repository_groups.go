@@ -4,8 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	"github.com/jmoiron/sqlx"
 )
 
 // Monitor Group operations
@@ -141,18 +139,19 @@ func (r *Repository) RemoveMonitorFromGroup(groupID, monitorID string) error {
 	return nil
 }
 
+// CORREÇÃO: GetGroupMembers melhorado para incluir dados completos dos monitors
 func (r *Repository) GetGroupMembers(groupID string) ([]*MonitorGroupMember, error) {
 	members := []*MonitorGroupMember{}
 
 	query := `
 		SELECT 
-			mgm.id as member_id,
+			mgm.id,
 			mgm.group_id,
 			mgm.monitor_id,
 			mgm.weight,
 			mgm.is_critical,
 			mgm.added_at,
-			m.id,
+			m.id as monitor_real_id,
 			m.tenant_id,
 			m.name,
 			m.type,
@@ -164,8 +163,8 @@ func (r *Repository) GetGroupMembers(groupID string) ([]*MonitorGroupMember, err
 			m.config,
 			m.notification_config,
 			m.tags,
-			m.created_at,
-			m.updated_at,
+			m.created_at as monitor_created_at,
+			m.updated_at as monitor_updated_at,
 			m.created_by
 		FROM monitor_group_members mgm
 		JOIN monitors m ON mgm.monitor_id = m.id
@@ -204,6 +203,14 @@ func (r *Repository) GetGroupMembers(groupID string) ([]*MonitorGroupMember, err
 	}
 
 	return members, nil
+}
+
+// NOVO: Método para contar members (performance)
+func (r *Repository) GetGroupMemberCount(groupID string) (int, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM monitor_group_members WHERE group_id = $1`
+	err := r.db.Get(&count, query, groupID)
+	return count, err
 }
 
 func (r *Repository) GetMonitorGroups(monitorID string) ([]*MonitorGroup, error) {
@@ -539,7 +546,25 @@ func (r *Repository) ExecQuery(query string, args ...interface{}) (sql.Result, e
 	return r.db.Exec(query, args...)
 }
 
-// GetDB returns the underlying database connection for debug purposes
-func (r *Repository) GetDB() *sqlx.DB {
-	return r.db
+func (r *Repository) GetGroupMembersBasic(groupID string) ([]*MonitorGroupMember, error) {
+	members := []*MonitorGroupMember{}
+
+	query := `
+		SELECT 
+			id,
+			group_id,
+			monitor_id,
+			weight,
+			is_critical,
+			added_at
+		FROM monitor_group_members
+		WHERE group_id = $1
+		ORDER BY is_critical DESC, weight DESC`
+
+	err := r.db.Select(&members, query, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group members basic: %w", err)
+	}
+
+	return members, nil
 }

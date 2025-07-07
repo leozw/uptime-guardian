@@ -98,7 +98,7 @@ func (w *Worker) processJob(job *CheckJob) {
 		)
 	}
 
-	// Update groups this monitor belongs to - MELHORADO
+	// Update groups this monitor belongs to - CORRIGIDO
 	groups, err := w.repo.GetMonitorGroups(job.Monitor.ID)
 	if err != nil {
 		w.logger.Debug("No groups found for monitor or error getting groups",
@@ -119,43 +119,9 @@ func (w *Worker) processJob(job *CheckJob) {
 				zap.String("monitor_id", job.Monitor.ID),
 			)
 
-			// NOVO DEBUG: Verificar se o grupo ainda existe antes de tentar atualizar
-			// Usar o tenant_id correto do grupo E testar sem tenant_id
-			groupFromDB, err := w.repo.GetMonitorGroup(group.ID, group.TenantID)
-			if err != nil {
-				w.logger.Warn("Group not found with tenant_id, trying without tenant restriction",
-					zap.String("group_id", group.ID),
-					zap.String("group_name", group.Name),
-					zap.String("group_tenant_id", group.TenantID),
-					zap.String("monitor_id", job.Monitor.ID),
-					zap.Error(err),
-				)
-
-				// Testar busca direta sem tenant_id para debug
-				var testGroup interface{}
-				testQuery := "SELECT id, name, tenant_id FROM monitor_groups WHERE id = $1"
-				if testErr := w.repo.GetDB().Get(&testGroup, testQuery, group.ID); testErr != nil {
-					w.logger.Error("Group does not exist in database at all",
-						zap.String("group_id", group.ID),
-						zap.Error(testErr),
-					)
-				} else {
-					w.logger.Error("Group exists in database but GetMonitorGroup failed - TENANT_ID MISMATCH!",
-						zap.String("group_id", group.ID),
-						zap.String("expected_tenant", group.TenantID),
-						zap.Any("actual_group_data", testGroup),
-					)
-				}
-				continue
-			}
-
-			w.logger.Debug("Group found successfully, updating status",
-				zap.String("group_id", group.ID),
-				zap.String("group_name", groupFromDB.Name),
-				zap.String("group_tenant_id", groupFromDB.TenantID),
-			)
-
-			if err := w.groupService.UpdateGroupStatus(group.ID); err != nil {
+			// CORREÇÃO: Passar o tenant_id do monitor (que é correto)
+			// ao invés de string vazia ou o tenant_id do grupo
+			if err := w.groupService.UpdateGroupStatus(group.ID, job.Monitor.TenantID); err != nil {
 				// Log como warning ao invés de error, para não poluir os logs
 				w.logger.Warn("Failed to update group status",
 					zap.Error(err),

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -17,7 +18,7 @@ type CreateMonitorGroupRequest struct {
 	Enabled          *bool                  `json:"enabled" binding:"required"`
 	Tags             map[string]interface{} `json:"tags"`
 	NotificationConf *db.NotificationConfig `json:"notification_config"`
-	Members          []GroupMemberRequest   `json:"members"`
+	Members          []GroupMemberRequest   `json:"members" binding:"required,min=1"`
 }
 
 type GroupMemberRequest struct {
@@ -27,12 +28,12 @@ type GroupMemberRequest struct {
 }
 
 type GroupAlertRuleRequest struct {
-	Name                 string                   `json:"name" binding:"required"`
-	Enabled              bool                     `json:"enabled"`
-	TriggerCondition     string                   `json:"trigger_condition" binding:"required,oneof=health_score_below any_critical_down percentage_down all_down"`
-	ThresholdValue       *float64                 `json:"threshold_value"`
-	NotificationChannels []db.NotificationChannel `json:"notification_channels"`
-	CooldownMinutes      int                      `json:"cooldown_minutes" binding:"min=0"`
+	Name                 string                  `json:"name" binding:"required"`
+	Enabled              bool                    `json:"enabled"`
+	TriggerCondition     string                  `json:"trigger_condition" binding:"required,oneof=health_score_below any_critical_down percentage_down all_down"`
+	ThresholdValue       *float64                `json:"threshold_value"`
+	NotificationChannels db.NotificationChannels `json:"notification_channels"`
+	CooldownMinutes      int                     `json:"cooldown_minutes" binding:"min=0"`
 }
 
 func (h *Handler) CreateMonitorGroup(c *gin.Context) {
@@ -104,13 +105,13 @@ func (h *Handler) CreateMonitorGroup(c *gin.Context) {
 		validatedMembers = append(validatedMembers, member)
 	}
 
-	// Weights should sum to approximately 1.0
-	if len(validatedMembers) > 0 && (totalWeight < 0.95 || totalWeight > 1.05) {
+	// CORREÇÃO: Weights should sum to approximately 1.0 (tolerância maior)
+	if len(validatedMembers) > 0 && (totalWeight < 0.99 || totalWeight > 1.01) {
 		h.logger.Error("Invalid total weight",
 			zap.Float64("total_weight", totalWeight),
 			zap.Int("members_count", len(validatedMembers)),
 		)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Member weights must sum to 1.0"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Member weights must sum to 1.0 (current: %.3f)", totalWeight)})
 		return
 	}
 
@@ -131,7 +132,7 @@ func (h *Handler) CreateMonitorGroup(c *gin.Context) {
 		group.NotificationConf = *req.NotificationConf
 	}
 
-	// Start transaction - CORRIGIDO para usar sqlx
+	// CORREÇÃO: Start transaction - Usar sqlx.Tx
 	tx, err := h.repo.BeginTx()
 	if err != nil {
 		h.logger.Error("Failed to start transaction", zap.Error(err))
@@ -246,10 +247,12 @@ func (h *Handler) GetMonitorGroup(c *gin.Context) {
 		return
 	}
 
-	// Load members
+	// Load members COM os dados dos monitors
 	members, err := h.repo.GetGroupMembers(groupID)
 	if err != nil {
 		h.logger.Error("Failed to get group members", zap.Error(err))
+		// Não falha a requisição, apenas retorna grupo sem members
+		group.Members = []db.MonitorGroupMember{}
 	} else {
 		group.Members = make([]db.MonitorGroupMember, len(members))
 		for i, member := range members {
@@ -261,6 +264,9 @@ func (h *Handler) GetMonitorGroup(c *gin.Context) {
 	status, err := h.repo.GetGroupStatus(groupID)
 	if err == nil {
 		group.Status = status
+	} else {
+		// Calculate status on the fly se não existir
+		group.Status = h.calculateGroupStatus(group)
 	}
 
 	c.JSON(http.StatusOK, group)
@@ -289,11 +295,24 @@ func (h *Handler) ListMonitorGroups(c *gin.Context) {
 		return
 	}
 
-	// Load status for each group
+	// Load status e members para cada grupo
 	for _, group := range groups {
+		// Load status
 		status, err := h.repo.GetGroupStatus(group.ID)
 		if err == nil {
 			group.Status = status
+		}
+
+		// CORREÇÃO: Carregar members básicos (sem dados completos dos monitors para performance)
+		members, err := h.repo.GetGroupMembersBasic(group.ID)
+		if err == nil {
+			group.Members = make([]db.MonitorGroupMember, len(members))
+			for i, member := range members {
+				group.Members[i] = *member
+			}
+		} else {
+			// Fallback: pelo menos definir como array vazio
+			group.Members = []db.MonitorGroupMember{}
 		}
 	}
 

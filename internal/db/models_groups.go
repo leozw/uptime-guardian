@@ -67,18 +67,33 @@ const (
 	CalculationMethodCriticalOnly    = "critical_only"
 )
 
+// CORREÇÃO: Novo tipo para NotificationChannels que suporta JSONB
+type NotificationChannels []NotificationChannel
+
+func (nc NotificationChannels) Value() (driver.Value, error) {
+	return json.Marshal(nc)
+}
+
+func (nc *NotificationChannels) Scan(value interface{}) error {
+	if value == nil {
+		*nc = []NotificationChannel{}
+		return nil
+	}
+	return json.Unmarshal(value.([]byte), nc)
+}
+
 // MonitorGroupAlertRule represents alert rules for a group
 type MonitorGroupAlertRule struct {
-	ID                   string                `json:"id" db:"id"`
-	GroupID              string                `json:"group_id" db:"group_id"`
-	Name                 string                `json:"name" db:"name"`
-	Enabled              bool                  `json:"enabled" db:"enabled"`
-	TriggerCondition     string                `json:"trigger_condition" db:"trigger_condition"`
-	ThresholdValue       *float64              `json:"threshold_value" db:"threshold_value"`
-	NotificationChannels []NotificationChannel `json:"notification_channels" db:"notification_channels"`
-	CooldownMinutes      int                   `json:"cooldown_minutes" db:"cooldown_minutes"`
-	CreatedAt            time.Time             `json:"created_at" db:"created_at"`
-	UpdatedAt            time.Time             `json:"updated_at" db:"updated_at"`
+	ID                   string               `json:"id" db:"id"`
+	GroupID              string               `json:"group_id" db:"group_id"`
+	Name                 string               `json:"name" db:"name"`
+	Enabled              bool                 `json:"enabled" db:"enabled"`
+	TriggerCondition     string               `json:"trigger_condition" db:"trigger_condition"`
+	ThresholdValue       *float64             `json:"threshold_value" db:"threshold_value"`
+	NotificationChannels NotificationChannels `json:"notification_channels" db:"notification_channels"` // CORRIGIDO: Usando o novo tipo
+	CooldownMinutes      int                  `json:"cooldown_minutes" db:"cooldown_minutes"`
+	CreatedAt            time.Time            `json:"created_at" db:"created_at"`
+	UpdatedAt            time.Time            `json:"updated_at" db:"updated_at"`
 }
 
 // Trigger conditions for group alerts
@@ -91,18 +106,18 @@ const (
 
 // MonitorGroupIncident represents an incident at the group level
 type MonitorGroupIncident struct {
-	ID                 string     `json:"id" db:"id"`
-	GroupID            string     `json:"group_id" db:"group_id"`
-	TenantID           string     `json:"-" db:"tenant_id"`
-	StartedAt          time.Time  `json:"started_at" db:"started_at"`
-	ResolvedAt         *time.Time `json:"resolved_at" db:"resolved_at"`
-	Severity           string     `json:"severity" db:"severity"`
-	AffectedMonitors   []string   `json:"affected_monitors" db:"affected_monitors"`
-	RootCauseMonitorID *string    `json:"root_cause_monitor_id" db:"root_cause_monitor_id"`
-	NotificationsSent  int        `json:"notifications_sent" db:"notifications_sent"`
-	HealthScoreAtStart *float64   `json:"health_score_at_start" db:"health_score_at_start"`
-	AcknowledgedAt     *time.Time `json:"acknowledged_at" db:"acknowledged_at"`
-	AcknowledgedBy     *string    `json:"acknowledged_by" db:"acknowledged_by"`
+	ID                 string      `json:"id" db:"id"`
+	GroupID            string      `json:"group_id" db:"group_id"`
+	TenantID           string      `json:"-" db:"tenant_id"`
+	StartedAt          time.Time   `json:"started_at" db:"started_at"`
+	ResolvedAt         *time.Time  `json:"resolved_at" db:"resolved_at"`
+	Severity           string      `json:"severity" db:"severity"`
+	AffectedMonitors   StringSlice `json:"affected_monitors" db:"affected_monitors"` // Usando StringSlice
+	RootCauseMonitorID *string     `json:"root_cause_monitor_id" db:"root_cause_monitor_id"`
+	NotificationsSent  int         `json:"notifications_sent" db:"notifications_sent"`
+	HealthScoreAtStart *float64    `json:"health_score_at_start" db:"health_score_at_start"`
+	AcknowledgedAt     *time.Time  `json:"acknowledged_at" db:"acknowledged_at"`
+	AcknowledgedBy     *string     `json:"acknowledged_by" db:"acknowledged_by"`
 }
 
 // MonitorGroupSLAReport represents SLA report for a group
@@ -118,33 +133,6 @@ type MonitorGroupSLAReport struct {
 	IncidentsCount     int       `json:"incidents_count" db:"incidents_count"`
 	SLOMet             bool      `json:"slo_met" db:"slo_met"`
 	CreatedAt          time.Time `json:"created_at" db:"created_at"`
-}
-
-// Value implementations for custom types
-func (mga MonitorGroupAlertRule) Value() (driver.Value, error) {
-	return json.Marshal(mga)
-}
-
-func (mga *MonitorGroupAlertRule) Scan(value interface{}) error {
-	if value == nil {
-		return nil
-	}
-	return json.Unmarshal(value.([]byte), mga)
-}
-
-// AffectedMonitors custom type for JSON array
-type AffectedMonitors []string
-
-func (am AffectedMonitors) Value() (driver.Value, error) {
-	return json.Marshal(am)
-}
-
-func (am *AffectedMonitors) Scan(value interface{}) error {
-	if value == nil {
-		*am = []string{}
-		return nil
-	}
-	return json.Unmarshal(value.([]byte), am)
 }
 
 // Helper methods
